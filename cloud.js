@@ -1,133 +1,297 @@
-/* EMPIREON cloud saves: no external SDK required. */
+/* EMPIREON 87.30: anonymous database saves. Bundled inside the standalone HTML. */
 (() => {
-'use strict';
-const CONFIG='empireon.cloud.config.v1', SESSION='empireon.cloud.session.v1';
-const read=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch{return null}};
-const config={url:'https://fcuijevvmjvjsaajonyb.supabase.co',key:'sb_publishable_inkAdkKhgFtS9bhH4mppzw_iaRHunj-'};
-const previousConfig = read(CONFIG);
-let session = read(SESSION), busy = false;
-// A session created for a different project cannot be reused with this game.
-if (previousConfig && previousConfig.url !== config.url) {
-  session = null;
-  try { localStorage.removeItem(SESSION); } catch {}
-}
-try { localStorage.removeItem(CONFIG); } catch {}
-const el=(tag,text,parent)=>{const n=document.createElement(tag);if(text)n.textContent=text;if(parent)parent.append(n);return n};
-const panel=el('dialog');panel.id='empireon-cloud';panel.dir='rtl';
-panel.style.cssText='background:#102d35;color:#fff;border:1px solid #bdab72;border-radius:16px;padding:24px;width:min(540px,94vw);max-height:90vh;overflow:auto;z-index:999999;font:15px system-ui';
-document.body.append(panel);
-const title=el('h2','EMPIREON — שמירות בענן',panel);
-const close=el('button','סגירה',panel);close.onclick=()=>panel.close();
-const status=el('p','',panel);status.setAttribute('role','status');
-const fields=el('div','',panel);
-function input(label, type, autocomplete) {
-  const wrapper = el('label', label, fields);
-  wrapper.style.display = 'block';
-  const field = el('input', '', wrapper);
-  field.type = type;
-  field.autocomplete = autocomplete;
-  field.style.cssText = 'display:block;width:100%;padding:8px;margin:6px 0 12px;color:#111;background:#fff';
-  return field;
-}
-const email = input('דואר אלקטרוני', 'email', 'email');
-const password = input('סיסמה', 'password', 'current-password');
-const actions = el('div', '', panel), list = el('div', '', panel);
-function button(text, fn) {
-  const b = el('button', text, actions);
-  b.style.cssText = 'padding:8px;margin:5px;border:1px solid #9b9;border-radius:6px';
-  b.onclick = () => run(fn);
-  return b;
-}
-function renderAccount() {
-  const connected = Boolean(session?.refresh_token);
-  fields.hidden = connected;
-  signup.hidden = login.hidden = connected;
-  logout.hidden = reload.hidden = list.hidden = !connected;
-  save.hidden = !connected || typeof gameStarted === 'undefined' || !gameStarted;
-}
-async function run(fn) {
-  if (busy) return;
-  busy = true;
-  actions.querySelectorAll('button').forEach(b => b.disabled = true);
-  try {
-    status.textContent = 'מבצע…';
-    await fn();
-  } catch (error) {
-    status.textContent = error.message || 'הפעולה נכשלה';
-  } finally {
-    busy = false;
-    renderAccount();
-    actions.querySelectorAll('button').forEach(b => b.disabled = false);
+  'use strict';
+  const project = 'https://fcuijevvmjvjsaajonyb.supabase.co';
+  const publicKey = 'sb_publishable_inkAdkKhgFtS9bhH4mppzw_iaRHunj-';
+  const sessionKey = 'empireon.cloud.session.v1';
+  const table = '/rest/v1/saved_games';
+  const message = (en, he) => typeof civiLanguage !== 'undefined' && civiLanguage === 'he' ? he : en;
+  const changed = () => Error(message('The slot changed. Reopen the list before trying again.', 'תא השמירה השתנה. יש לפתוח את הרשימה מחדש.'));
+  let sessionRequest;
+  let invalidSession = false;
+
+  function savedIdentity() {
+    return JSON.parse(localStorage.getItem(sessionKey) || 'null');
   }
-}
-async function request(path,{method='GET',body,token=false}={}){if(token)await refresh();const headers={apikey:config.key,'Content-Type':'application/json'};if(token)headers.Authorization='Bearer '+session.access_token;const r=await fetch(config.url+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(30000)});let data=null;const raw=await r.text();try{data=raw?JSON.parse(raw):null}catch{}if(!r.ok){const error=Error(data?.msg||data?.message||data?.error_description||`שגיאת שרת ${r.status}`);error.status=r.status;throw error;}return data;}
-function remember(s){session={...s,expires_at:Math.floor(Date.now()/1000)+(s.expires_in||3600)};localStorage.setItem(SESSION,JSON.stringify(session));}
-function forgetSession() {
-  session = null;
-  localStorage.removeItem(SESSION);
-  list.replaceChildren();
-}
-async function refresh() {
-  if (!session?.refresh_token) throw Error('יש להתחבר לחשבון');
-  if (session.expires_at > Date.now()/1000 + 60) return;
-  try {
-    const result = await request('/auth/v1/token?grant_type=refresh_token', {
-      method: 'POST', body: { refresh_token: session.refresh_token }
-    });
-    remember(result);
-  } catch (error) {
-    if (error.status === 400 || error.status === 401) {
-      forgetSession();
-      throw Error('ההתחברות פגה. יש להתחבר שוב.');
+  async function request(path, {method='GET', body, token, prefer}={}) {
+    const headers = {apikey:publicKey};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = 'Bearer ' + token;
+    if (prefer) headers.Prefer = prefer;
+    const response = await fetch(project + path, {method, headers, cache:'no-store',
+      body:body === undefined || typeof body === 'string' ? body : JSON.stringify(body), signal:AbortSignal.timeout(30000)});
+    const raw = await response.text();
+    let data;
+    try { data = raw ? JSON.parse(raw) : null; } catch {}
+    if (!response.ok) {
+      const error = Error(data?.error_code || data?.code || 'HTTP ' + response.status);
+      error.status = response.status;
+      throw error;
     }
-    throw error;
+    if (raw && data === undefined) throw Error('Invalid database response');
+    return data;
   }
-}
-function credentials() {
-  return { email: email.value.trim(), password: password.value };
-}
-const signup = button('הרשמה', async () => {
-  const result = await request('/auth/v1/signup', {method: 'POST', body: credentials()});
-  password.value = '';
-  if (result?.access_token) {
-    remember(result);
-    await listing();
-  } else {
-    status.textContent = 'בדוק בדואר האלקטרוני אם נדרש אישור הרשמה';
+  function identity() {
+    if (sessionRequest) return sessionRequest;
+    const establish = async () => {
+      const old = savedIdentity();
+      if (old?.access_token && old.expires_at > Date.now()/1000 + 60) return old;
+      // Refuse to create an unreachable identity if the browser blocks token storage.
+      if (!old) {
+        localStorage.setItem(sessionKey + '.check', '1');
+        localStorage.removeItem(sessionKey + '.check');
+      }
+      let result;
+      try {
+        result = old?.refresh_token
+          ? await request('/auth/v1/token?grant_type=refresh_token', {method:'POST', body:{refresh_token:old.refresh_token}})
+          : await request('/auth/v1/signup', {method:'POST', body:{data:{}}});
+      } catch (error) {
+        if (old?.refresh_token && [400,401,403].includes(error.status)) invalidSession = true;
+        throw error;
+      }
+      if (!result?.access_token || !result.refresh_token || !result.user?.id) throw Error('Missing identity');
+      const value = {access_token:result.access_token, refresh_token:result.refresh_token,
+        expires_at:result.expires_at || Math.floor(Date.now()/1000)+(result.expires_in || 3600), user:{id:result.user.id}};
+      localStorage.setItem(sessionKey, JSON.stringify(value));
+      invalidSession = false;
+      return value;
+    };
+    sessionRequest = (navigator.locks ? navigator.locks.request(sessionKey, establish) : establish())
+      .finally(() => { sessionRequest = undefined; });
+    return sessionRequest;
   }
-});
-const login = button('התחברות', async () => {
-  const result = await request('/auth/v1/token?grant_type=password', {method: 'POST', body: credentials()});
-  password.value = '';
-  remember(result);
-  await listing();
-});
-const logout = button('התנתקות', async () => {
-  try {
-    if (session) await request('/auth/v1/logout', {method:'POST', token:true});
-  } finally {
-    forgetSession();
-    status.textContent = 'החשבון נותק מהמכשיר';
+  async function database(query, options) {
+    const body = options?.body;
+    const payload = body === undefined || typeof body === 'string' ? body : JSON.stringify(body);
+    const session = await identity();
+    return request(table + query, {...options, body:payload, token:session.access_token});
   }
-});
-const reload = button('רענון הרשימה', listing);
-const save = button('שמירת המשחק בענן', async () => {
-if(typeof gameStarted==='undefined'||!gameStarted)throw Error('יש להתחיל או לטעון משחק לפני שמירה');
-await refresh();const data=makeSaveData();data.cloudSchemaVersion=1;
-// Always create a snapshot: another computer cannot silently overwrite it.
-const row={name:data.saveName||'EMPIREON',game_version:'87.29',schema_version:1,turn_number:data.turnNumber||1,state:data};
-// Local checkpoint must succeed before any network write.
-if(!saveToSlot(0,true))throw Error('השמירה המקומית נכשלה; פנה מקום או ייצא קובץ לפני שמירה בענן');
-await request('/rest/v1/saved_games',{method:'POST',body:row,token:true});await listing();status.textContent='המשחק נשמר במחשב ובענן';
-});
-async function listing(){const rows=await request('/rest/v1/saved_games?select=id,name,turn_number,created_at&order=created_at.desc&limit=100',{token:true});list.replaceChildren();for(const row of rows){const line=el('div','',list);line.style.cssText='padding:12px;border-bottom:1px solid #577';el('span',`${row.name} — ${new Date(row.created_at).toLocaleString()}`,line);const b=el('button','טעינה',line);b.style.margin='8px';b.onclick=()=>run(async()=>{if(typeof gameStarted!=='undefined'&&gameStarted&&!confirm('לטעון את השמירה ולהחליף את המשחק הפתוח?'))return;const rows=await request('/rest/v1/saved_games?id=eq.'+encodeURIComponent(row.id)+'&select=state,schema_version',{token:true});const r=rows?.[0];if(!r||r.schema_version!==1)throw Error('גרסת השמירה אינה נתמכת');validate(r.state);if(typeof gameStarted!=='undefined'&&gameStarted&&!saveToSlot(0,true))throw Error('גיבוי המשחק הפתוח נכשל; הטעינה בוטלה');applySaveData(r.state);panel.close();showMsg('המשחק נטען מהענן');});}status.textContent=rows.length?`${rows.length} שמירות בחשבון`:'אין שמירות בענן עדיין'}
-function validate(d){if(!d||!Number.isInteger(d.MAP_WIDTH)||!Number.isInteger(d.MAP_HEIGHT)||d.MAP_WIDTH<1||d.MAP_HEIGHT<1||!Array.isArray(d.map)||d.map.length!==d.MAP_WIDTH||!d.map.every(c=>Array.isArray(c)&&c.length===d.MAP_HEIGHT)||!Array.isArray(d.units)||!Array.isArray(d.cities))throw Error('מבנה שמירה לא תקין');}
-const launch=el('button','☁ שמירות בענן',document.body);launch.id='empireon-cloud-open';launch.style.cssText='position:fixed;bottom:12px;left:12px;z-index:99999;background:#173d45;color:#fff;border:1px solid #baa66b;border-radius:8px;padding:10px;cursor:pointer';launch.onclick = () => {
-  renderAccount();
-  panel.showModal();
-  if (session?.refresh_token) return run(listing);
-  status.textContent = 'כדי לשמור ולטעון משחקים במכשירים שלך, יש להתחבר לחשבון.';
-};
-panel.onclose = () => { password.value = ''; };
-renderAccount();
+  function describe(error) {
+    if (invalidSession) return message('This player session has expired.', 'פג תוקף הזיהוי של השחקן.');
+    if (error.message === '23505') return changed().message;
+    if (error.status || error instanceof TypeError || error.name === 'TimeoutError') {
+      return message('Cannot reach cloud saves. Try again in a moment.', 'השמירות בענן אינן זמינות כרגע. אפשר לנסות שוב בעוד רגע.');
+    }
+    return error.message;
+  }
+  function snapshot() {
+    const data = makeSaveData();
+    data.version = 25;
+    data.gameHistory = gameHistory;
+    data.historyEvents = historyEvents;
+    return data;
+  }
+  function record(state, slot) {
+    return {slot, name:String(state.saveName || 'EMPIREON').slice(0,200),
+      turn_number:state.turnNumber ?? 1, game_version:'87.30', schema_version:1,
+      revision:crypto.randomUUID(), state};
+  }
+  function validate(state) {
+    const width=state?.MAP_WIDTH, height=state?.MAP_HEIGHT;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width<1 || height<1 ||
+        !Array.isArray(state.map) || !Array.isArray(state.units) || !Array.isArray(state.cities) ||
+        !(state.map.length===width && state.map.every(col=>Array.isArray(col) && col.length===height) ||
+          state.map.length===width*height && !Array.isArray(state.map[0]))) {
+      throw Error(message('Invalid save file.', 'מבנה השמירה אינו תקין.'));
+    }
+  }
+  async function listSlots() {
+    const columns='id,slot,revision,name,turn_number,created_at,saved_at:state->>savedAt,thumbnail:state->>saveThumbnail';
+    return database('?select='+columns+'&slot=not.is.null&order=slot.asc');
+  }
+  async function writeSlot(slot, previous, state) {
+    const row=record(state,slot);
+    if (!previous) {
+      await database('', {method:'POST',body:row,prefer:'return=minimal'});
+      return;
+    }
+    const result=await database('?id=eq.'+previous.id+'&revision=eq.'+previous.revision+'&select=id',
+      {method:'PATCH',body:row,prefer:'return=representation'});
+    if (!result?.length) throw changed();
+  }
+  async function remove(row) {
+    const result=await database('?id=eq.'+row.id+'&revision=eq.'+row.revision+'&select=id',
+      {method:'DELETE',prefer:'return=representation'});
+    if (!result?.length) throw changed();
+  }
+
+  let autoTimer, pending=false, queued, writing=false, failureReported=false;
+  function scheduleAuto() {
+    if (!gameStarted) return;
+    pending=true;
+    if (!autoTimer && !writing) autoTimer=setTimeout(flushAuto,3000);
+  }
+  async function flushAuto() {
+    clearTimeout(autoTimer); autoTimer=undefined;
+    try {
+      if (pending && gameStarted) {
+        // Freeze the outgoing game before a menu, load, or new game changes its state.
+        queued=JSON.stringify(record(snapshot(),0));
+        pending=false;
+      }
+    } catch (error) {
+      if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
+      failureReported=true;
+      autoTimer=setTimeout(flushAuto,30000);
+      return;
+    }
+    if (writing || !queued) return;
+    writing=true;
+    const payload=queued; queued=undefined;
+    try {
+      await database('?on_conflict=user_id,slot',{method:'POST',body:payload,prefer:'resolution=merge-duplicates,return=minimal'});
+      failureReported=false;
+    } catch (error) {
+      queued=queued || payload;
+      if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
+      failureReported=true;
+    } finally {
+      writing=false;
+      if (queued || pending && gameStarted) autoTimer=setTimeout(flushAuto,failureReported?30000:queued?0:3000);
+    }
+  }
+  window.addEventListener('online',flushAuto);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden') void flushAuto();});
+
+  let generation=0;
+  function close() {
+    generation++;
+    document.getElementById('save-load-modal').classList.add('hidden');
+  }
+  function button(parent, label, action) {
+    const b=document.createElement('button');
+    b.type='button'; b.className='bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-xs font-bold';
+    b.textContent=label; b.onclick=action; parent.appendChild(b);
+    return b;
+  }
+  async function menu(mode) {
+    const id=++generation;
+    const modal=document.getElementById('save-load-modal'), list=document.getElementById('save-slot-list');
+    const status=document.getElementById('save-load-subtitle'), saving=mode==='save';
+    const current=()=>generation===id;
+    modal.classList.remove('hidden'); list.replaceChildren();
+    document.getElementById('save-load-title').textContent=saving?message('Save game','שמירת משחק'):message('Load game','טעינת משחק');
+    status.textContent=message('Loading cloud saves…','טוען את השמירות מהענן…');
+    let busy=false;
+    async function act(operation) {
+      if (busy || !current()) return;
+      busy=true;
+      status.textContent=message('Please wait…','רגע אחד…');
+      try { await operation(); }
+      catch(error) { if(current()) status.textContent=describe(error); }
+      finally { busy=false; }
+    }
+    async function load(row) {
+      if (gameStarted && !confirm(message('Replace the open game with this save?', 'להחליף את המשחק הפתוח בשמירה הזאת?'))) {status.textContent=''; return;}
+      const rows=await database('?id=eq.'+row.id+'&select=state,schema_version');
+      if (!current()) return;
+      if (!rows?.length || rows[0].schema_version!==1) throw changed();
+      validate(rows[0].state);
+      applySaveData(rows[0].state);
+      scheduleAuto();
+      close(); playSound('load'); showMsg(message('Game loaded.', 'המשחק נטען.'));
+    }
+    function addRow(slot,row) {
+      const line=document.createElement('div');
+      line.className='save-slot-card bg-slate-800 border border-slate-700 rounded-xl p-3 flex items-center gap-3';
+      if (row?.thumbnail?.startsWith('data:image/')) {
+        const img=document.createElement('img'); img.src=row.thumbnail; img.alt=''; img.className='w-20 rounded'; line.appendChild(img);
+      }
+      const label=document.createElement('div'); label.className='flex-1 min-w-0';
+      const title=slot===null?message('Previous save','שמירה קודמת'):slot===0?message('Autosave','שמירה אוטומטית'):message('Slot ','תא ')+slot;
+      label.textContent=title+(row?' · '+row.name:' · '+message('Empty','פנוי'));
+      if (row) {
+        const time=document.createElement('small'); time.className='block text-slate-400';
+        time.textContent=new Date(row.saved_at||row.created_at).toLocaleString(); label.appendChild(time);
+      }
+      line.appendChild(label);
+      if (saving) {
+        button(line,message('Save','שמירה'),()=>act(async()=>{
+          await writeSlot(slot,row,snapshot());
+          if(current()) { close(); playSound('save'); showMsg(message('Saved to the cloud.', 'המשחק נשמר בענן.')); }
+        }));
+        if(row) button(line,'✕',()=>act(async()=>{
+          if (!confirm(message('Delete this saved game?', 'למחוק את השמירה הזאת?'))) {status.textContent='';return;}
+          await remove(row); if(current()) await menu(mode);
+        }));
+      } else if(row) button(line,message('Load','טעינה'),()=>act(()=>load(row)));
+      list.appendChild(line);
+    }
+    async function previousPage(offset) {
+      const rows=await database('?slot=is.null&select=id,revision,name,created_at,turn_number&order=created_at.desc,id.desc&limit=26&offset='+offset);
+      if(!current()) return;
+      for(const row of rows.slice(0,25)) addRow(null,row);
+      if(rows.length>25) {
+        const more=button(list,message('More saves','עוד שמירות'),()=>act(async()=>{await previousPage(offset+25);more.remove();}));
+      }
+    }
+    try {
+      const rows=await listSlots(); if(!current()) return;
+      if(!saving && rows.some(r=>r.slot===0)) addRow(0,rows.find(r=>r.slot===0));
+      for(let slot=1;slot<SAVE_SLOT_COUNT;slot++) addRow(slot,rows.find(r=>r.slot===slot));
+      if(!saving) {
+        await previousPage(0); if(!current()) return;
+        const old=await legacySlots(); if(!current()) return;
+        if(old.length) button(list,message('Import saves from the previous version','ייבוא שמירות מהגרסה הקודמת'),()=>act(async()=>{
+          for(const {slot,state} of old) await importLegacy(slot,state);
+          if(current()) await menu('load');
+        }));
+      }
+      status.textContent=saving?message('Choose a cloud save slot.', 'בחר תא שמירה בענן.'):message('Choose a game to load.', 'בחר משחק לטעינה.');
+    } catch(error) {
+      if(!current()) return;
+      status.textContent=describe(error);
+      button(list,message('Retry','נסה שוב'),()=>menu(mode));
+      if(invalidSession) button(list,message('Start a new anonymous player','יצירת שחקן אנונימי חדש'),()=>{
+        if(!confirm(message('Start a separate player? Previous cloud saves stay with the old identity.', 'ליצור שחקן חדש? השמירות הקודמות שייכות לזהות הישנה.'))) return;
+        localStorage.removeItem(sessionKey); invalidSession=false; menu(mode);
+      });
+    }
+  }
+  async function legacySlots() {
+    const result=[];
+    let db;
+    try {
+      if (window.indexedDB && (!indexedDB.databases || (await indexedDB.databases()).some(d=>d.name==='EMPIREON_Mobilization_Save_V8721'))) {
+        db=await new Promise((resolve,reject)=>{
+          const req=indexedDB.open('EMPIREON_Mobilization_Save_V8721');
+          req.onupgradeneeded=()=>req.transaction.abort();
+          req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error);
+        });
+      }
+    } catch {}
+    async function read(key) {
+      if (!db?.objectStoreNames.contains('saves')) return null;
+      return new Promise(resolve=>{
+        const req=db.transaction('saves','readonly').objectStore('saves').get(key);
+        req.onsuccess=()=>resolve(req.result); req.onerror=()=>resolve(null);
+      });
+    }
+    try {
+      for(let slot=0;slot<SAVE_SLOT_COUNT;slot++) {
+        let state=await read(slot);
+        if(!state) try {state=JSON.parse(localStorage.getItem(SAVE_PREFIX+slot)||(slot===0&&localStorage.getItem(LEGACY_SAVE_KEY))||'null');} catch {}
+        if(!state) continue;
+        if(slot===0) {
+          const archive=await read('auto-history');
+          if(archive?.worldSeed===state.worldSeed && archive?.turnNumber===state.turnNumber && archive?.playerCivKey===state.playerCivKey && Array.isArray(archive?.history) && archive.history.length>(state.gameHistory?.length||0)) {
+            state.gameHistory=archive.history; state.historyEvents=archive.events||state.historyEvents;
+          }
+        }
+        result.push({slot,state});
+      }
+    } finally { db?.close(); }
+    return result;
+  }
+  async function importLegacy(slot,state) {
+    validate(state);
+    const user=(await identity()).user.id;
+    const row=record(state,null);
+    const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([user,slot,state])));
+    const hex=Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
+    row.id=[hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20,32)].join('-');
+    await database('?on_conflict=id',{method:'POST',body:row,prefer:'resolution=ignore-duplicates,return=minimal'});
+  }
+  window.empireonSaves={menu, close, scheduleAuto, flushAuto};
 })();
