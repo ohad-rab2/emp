@@ -1,0 +1,33 @@
+name: Assemble cloud UI hotfix
+on:
+  push:
+    branches: [build/cloud-settings-hotfix-8729]
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Update the embedded cloud module and verify the standalone game
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          page = Path("EMPIREON_v87_29_Cloud_Saves.html")
+          previous = subprocess.check_output(["git", "show", "55edd70ff37470a55213f523da7ee450ed4bae24:cloud.js"])
+          game = page.read_bytes()
+          assert game.count(previous) == 1
+          page.write_bytes(game.replace(previous, Path("cloud.js").read_bytes()))
+          PY
+          test "$(git hash-object EMPIREON_v87_29_Cloud_Saves.html)" = "f0c10cd5aa659f53204d70c591fbac2ab4b2b382"
+          node test-cloud.cjs
+      - name: Store verified standalone on the build branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- EMPIREON_v87_29_Cloud_Saves.html
+          git commit -m "Embed tested cloud interface in EMPIREON 87.29"
+          git push origin HEAD:refs/heads/build/cloud-settings-hotfix-8729
