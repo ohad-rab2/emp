@@ -6,19 +6,23 @@ layout: null
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>EMPIREON</title>
+  <title>EMPIREON - בחירת גרסה</title>
   <style>
     html { color-scheme: dark; background: #111a22; color: #f4ead4; font: 1rem system-ui, sans-serif; }
-    body { max-width: 36rem; margin: 18vh auto; padding: 1.5rem; }
-    a { color: #e6bf77; }
+    body { max-width: 36rem; margin: 12vh auto; padding: 1.5rem; }
+    a { color: #e6bf77; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ul { list-style: none; padding: 0; margin-top: 1.5rem; }
+    li { margin-bottom: 0.75rem; padding: 0.75rem 1rem; background: #192632; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; }
+    .badge { background: #e6bf77; color: #111a22; font-size: 0.75rem; font-weight: bold; padding: 0.2rem 0.5rem; border-radius: 4px; }
   </style>
 </head>
 <body>
   <main>
     <h1 lang="en">EMPIREON</h1>
-    <p id="status" role="status">פותח את הגרסה האחרונה…</p>
-    <a id="play" hidden>פתיחת המשחק</a>
-    <noscript>כדי לפתוח את המשחק יש להפעיל JavaScript בדפדפן.</noscript>
+    <p id="status" role="status">טוען רשימת גרסאות…</p>
+    <ul id="releases-list"></ul>
+    <noscript>כדי לצפות ברשימת הגרסאות יש להפעיל JavaScript בדפדפן.</noscript>
   </main>
 
   <!-- GitHub Pages fills this list from the files in the same deployment. -->
@@ -30,38 +34,52 @@ layout: null
       <span data-path="{{ page_file.url | escape }}"></span>
     {% endfor %}
   </template>
+
   <script>
     (() => {
       const published = new URL("https://ohad-rab2.github.io/emp/game.html");
       const status = document.getElementById("status");
-      const link = document.getElementById("play");
+      const list = document.getElementById("releases-list");
 
-      function openGame(target) {
+      // Helper to build a link keeping current search/hash params
+      function buildTargetUrl(baseUrl) {
+        const target = new URL(baseUrl, location.href);
         target.search = location.search;
         target.hash = location.hash;
-        link.href = target.href;
-        link.hidden = false;
-        location.replace(target.href);
+        return target.href;
       }
 
-      // Opening a downloaded source file should launch the published game.
+      // Opening a downloaded source file shows a link to the published page instead of auto-redirecting
       if (location.protocol === "file:" || "{{ 'published' }}" !== "published") {
         if (location.origin === published.origin && location.pathname === published.pathname) {
           status.textContent = "דף המשחק טרם עובד על ידי GitHub Pages. נסה לרענן בעוד רגע.";
           return;
         }
-        openGame(published);
+        status.textContent = "הקובץ נפתח מקומית. למעבר לגרסה המפורסמת ברשת:";
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = buildTargetUrl(published.href);
+        a.textContent = "פתיחת EMPIREON (גרסת רשת)";
+        li.appendChild(a);
+        list.appendChild(li);
         return;
       }
 
       const names = document.getElementById("releases").content.querySelectorAll("[data-path]");
       const pattern = /^(?:EMPIREON|CIVI)_v(\d+(?:[._-]\d+)*)(?:[ ._-][^/]+)?\.html$/i;
       const releases = [];
+
       for (const node of names) {
         const name = node.dataset.path.replace(/^\//, "");
         const match = pattern.exec(name);
-        if (match) releases.push({name, version: match[1].split(/[._-]/).map(Number)});
+        if (match) {
+          releases.push({
+            name,
+            version: match[1].split(/[._-]/).map(Number)
+          });
+        }
       }
+
       releases.sort((left, right) => {
         const length = Math.max(left.version.length, right.version.length);
         for (let i = 0; i < length; i++) {
@@ -73,7 +91,27 @@ layout: null
       });
 
       if (releases.length) {
-        openGame(new URL(encodeURIComponent(releases[0].name), location.href));
+        status.textContent = "בחר גרסה להפעלה:";
+        
+        releases.forEach((release, index) => {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.href = buildTargetUrl(encodeURIComponent(release.name));
+          a.textContent = release.name.replace(/\.html$/i, "");
+          a.dir = "ltr"; // Keep filename left-to-right for readability
+          
+          li.appendChild(a);
+
+          // Highlight the newest version at the top of the list
+          if (index === 0) {
+            const badge = document.createElement("span");
+            badge.className = "badge";
+            badge.textContent = "החדשה ביותר";
+            li.appendChild(badge);
+          }
+
+          list.appendChild(li);
+        });
       } else {
         status.textContent = "טרם פורסמה גרסת משחק בתיקייה הזאת.";
       }
