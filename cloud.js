@@ -5,6 +5,7 @@
   const publicKey = 'sb_publishable_inkAdkKhgFtS9bhH4mppzw_iaRHunj-';
   const sessionKey = 'empireon.cloud.session.v1';
   const table = '/rest/v1/saved_games';
+  const saveTimeout = 60000;
   const message = (en, he) => typeof civiLanguage !== 'undefined' && civiLanguage === 'he' ? he : en;
   const changed = () => Error(message('The slot changed. Reopen the list before trying again.', 'תא השמירה השתנה. יש לפתוח את הרשימה מחדש.'));
   let sessionRequest;
@@ -13,13 +14,13 @@
   function savedIdentity() {
     return JSON.parse(localStorage.getItem(sessionKey) || 'null');
   }
-  async function request(path, {method='GET', body, token, prefer}={}) {
+  async function request(path, {method='GET', body, token, prefer, timeout=30000}={}) {
     const headers = {apikey:publicKey};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = 'Bearer ' + token;
     if (prefer) headers.Prefer = prefer;
     const response = await fetch(project + path, {method, headers, cache:'no-store',
-      body:body === undefined || typeof body === 'string' ? body : JSON.stringify(body), signal:AbortSignal.timeout(30000)});
+      body:body === undefined || typeof body === 'string' ? body : JSON.stringify(body), signal:AbortSignal.timeout(timeout)});
     const raw = await response.text();
     let data;
     try { data = raw ? JSON.parse(raw) : null; } catch {}
@@ -85,6 +86,7 @@
     if (invalidSession) return message('This player session has expired.', 'פג תוקף הזיהוי של השחקן.');
     if (error.message === '23505') return changed().message;
     if (error.name === 'TimeoutError') return message('The cloud request timed out. Try again.', 'תם הזמן שהוקצב לבקשה לענן. אפשר לנסות שוב.');
+    if (error.status === 413) return message('The cloud rejected the save because it is too large.', 'הענן דחה את השמירה בגלל גודלה.');
     if (error.status || error instanceof TypeError) {
       return message('Cannot reach cloud saves. Try again in a moment.', 'השמירות בענן אינן זמינות כרגע. אפשר לנסות שוב בעוד רגע.');
     }
@@ -123,6 +125,45 @@
       turn_number:state.turnNumber ?? 1, game_version:CIVI_VERSION, schema_version:1,
       revision:crypto.randomUUID(), state:compact};
   }
+  function encodeRecord(row) {
+    const {savedAt, saveThumbnail, ...gameState} = row.state;
+    // Serialize immediately so the autosave can survive a change of game while it compresses.
+    const json = JSON.stringify(gameState);
+    if (json.length < 4096 || typeof CompressionStream !== 'function' || typeof DecompressionStream !== 'function') {
+      return Promise.resolve(JSON.stringify(row));
+    }
+    return (async () => {
+      try {
+        const stream = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+        const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+        if (Math.ceil(bytes.length / 3) * 4 + 40 < json.length) {
+          let binary = '';
+          for (let offset = 0; offset < bytes.length; offset += 16384) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
+          }
+          return JSON.stringify({...row, state:{savedAt, saveThumbnail, gzipBase64:btoa(binary)}});
+        }
+      } catch {
+        // A missing or failed compressor still permits ordinary JSON saves.
+      }
+      return JSON.stringify({...row, state:{...JSON.parse(json), savedAt, saveThumbnail}});
+    })();
+  }
+  async function decodeState(state) {
+    if (!Object.hasOwn(state ?? {}, 'gzipBase64')) return state;
+    if (typeof DecompressionStream !== 'function') {
+      throw Error(message('This browser cannot open compressed saves. Open the game in an updated browser.',
+        'הדפדפן אינו תומך בפתיחת שמירות דחוסות. יש לפתוח את המשחק בדפדפן מעודכן.'));
+    }
+    try {
+      const bytes = Uint8Array.from(atob(state.gzipBase64), char => char.charCodeAt(0));
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      const gameState = JSON.parse(await new Response(stream).text());
+      return {...gameState, savedAt:state.savedAt, saveThumbnail:state.saveThumbnail};
+    } catch {
+      throw Error(message('The compressed cloud save could not be read.', 'לא ניתן לקרוא את השמירה הדחוסה בענן.'));
+    }
+  }
   function validate(state) {
     const width=state?.MAP_WIDTH, height=state?.MAP_HEIGHT;
     if (!Number.isInteger(width) || !Number.isInteger(height) || width<1 || height<1 ||
@@ -136,15 +177,43 @@
     const columns='id,slot,revision,name,turn_number,created_at,saved_at:state->>savedAt,thumbnail:state->>saveThumbnail';
     return database('?select='+columns+'&slot=not.is.null&order=slot.asc');
   }
-  async function writeSlot(slot, previous, state) {
-    const row=record(state,slot);
+  async function writeSlot(previous, body) {
     if (!previous) {
-      await database('', {method:'POST',body:row,prefer:'return=minimal'});
+      await database('', {method:'POST',body,prefer:'return=minimal',timeout:saveTimeout});
       return;
     }
     const result=await database('?id=eq.'+previous.id+'&revision=eq.'+previous.revision+'&select=id',
-      {method:'PATCH',body:row,prefer:'return=representation'});
+      {method:'PATCH',body,prefer:'return=representation',timeout:saveTimeout});
     if (!result?.length) throw changed();
+  }
+  function retryableSaveError(error) {
+    return error.name === 'TimeoutError' || error instanceof TypeError ||
+      [408,500,502,503,504].includes(error.status);
+  }
+  async function saveManual(row, previous, body, setStatus) {
+    const verify = async () => {
+      const rows = await database('?slot=eq.'+row.slot+'&select=id,revision');
+      return rows[0];
+    };
+    try {
+      await writeSlot(previous, body);
+    } catch (error) {
+      if (!retryableSaveError(error)) throw error;
+      setStatus(message('Checking whether the save reached the cloud…', 'בודק אם השמירה הגיעה לענן…'));
+      let latest = await verify().catch(() => { throw error; });
+      if (latest?.revision === row.revision) return;
+      if (latest?.id !== previous?.id || latest?.revision !== previous?.revision) throw changed();
+      setStatus(message('Retrying cloud save…', 'מנסה שוב לשמור בענן…'));
+      try {
+        await writeSlot(previous, body);
+      } catch (retryError) {
+        // The first attempt can commit after the check and before the retry.
+        latest = await verify().catch(() => { throw retryError; });
+        if (latest?.revision === row.revision) return;
+        if (latest?.id !== previous?.id || latest?.revision !== previous?.revision) throw changed();
+        throw retryError;
+      }
+    }
   }
   async function remove(row) {
     const result=await database('?id=eq.'+row.id+'&revision=eq.'+row.revision+'&select=id',
@@ -152,21 +221,21 @@
     if (!result?.length) throw changed();
   }
 
-  let autoTimer, pending=false, queued, autoWrite, failureReported=false;
+  let autoTimer, pending=false, queued, autoWrite, manualWriting=false, failureReported=false;
   function hasPendingAutosave() {
     return !!(autoWrite || queued || pending && gameStarted);
   }
   function scheduleAuto() {
     if (!gameStarted) return;
     pending=true;
-    if (!autoTimer && !autoWrite) autoTimer=setTimeout(flushAuto,3000);
+    if (!autoTimer && !autoWrite && !manualWriting) autoTimer=setTimeout(flushAuto,3000);
   }
   function flushAuto() {
     clearTimeout(autoTimer); autoTimer=undefined;
     try {
       if (pending && gameStarted) {
         // Freeze the outgoing game before a menu, load, or new game changes its state.
-        queued=JSON.stringify(record(snapshot(),0));
+        queued=encodeRecord(record(snapshot(),0));
         pending=false;
       }
     } catch (error) {
@@ -175,9 +244,10 @@
       autoTimer=setTimeout(flushAuto,30000);
       return autoWrite;
     }
-    if (autoWrite || !queued) return autoWrite;
+    if (autoWrite || manualWriting || !queued) return autoWrite;
     const payload=queued; queued=undefined;
-    autoWrite=database('?on_conflict=user_id,slot',{method:'POST',body:payload,prefer:'resolution=merge-duplicates,return=minimal'}).then(()=>{
+    autoWrite=payload.then(body=>database('?on_conflict=user_id,slot',{method:'POST',body,
+      prefer:'resolution=merge-duplicates,return=minimal',timeout:saveTimeout})).then(()=>{
       failureReported=false;
     }).catch(error=>{
       queued=queued || payload;
@@ -185,7 +255,7 @@
       failureReported=true;
     }).finally(()=>{
       autoWrite=undefined;
-      if (queued || pending && gameStarted) autoTimer=setTimeout(flushAuto,failureReported?30000:queued?0:3000);
+      if (!manualWriting && (queued || pending && gameStarted)) autoTimer=setTimeout(flushAuto,failureReported?30000:queued?0:3000);
     });
     return autoWrite;
   }
@@ -225,8 +295,10 @@
       const rows=await database('?id=eq.'+row.id+'&select=state,schema_version');
       if (!current()) return;
       if (!rows?.length || rows[0].schema_version!==1) throw changed();
-      validate(rows[0].state);
-      applySaveData(rows[0].state);
+      const state = await decodeState(rows[0].state);
+      if (!current()) return;
+      validate(state);
+      applySaveData(state);
       if (row.slot!==0) scheduleAuto();
       close(); playSound('load'); showMsg(message('Game loaded.', 'המשחק נטען.'));
     }
@@ -258,7 +330,22 @@
       line.appendChild(label);
       if (saving) {
         button(line,message('Save','שמירה'),()=>act(async()=>{
-          await writeSlot(slot,row,snapshot());
+          if (manualWriting) throw Error(message('Another manual save is still running.', 'שמירה ידנית אחרת עדיין מתבצעת.'));
+          const next = record(snapshot(),slot);
+          const setStatus = text => { if (current()) status.textContent=text; };
+          manualWriting=true;
+          try {
+            const body = await encodeRecord(next);
+            if (autoWrite) {
+              setStatus(message('Waiting for the current autosave…', 'ממתין לסיום השמירה האוטומטית…'));
+              await autoWrite;
+            }
+            setStatus(message('Uploading save…', 'מעלה את השמירה לענן…'));
+            await saveManual(next,row,body,setStatus);
+          } finally {
+            manualWriting=false;
+            if (hasPendingAutosave()) void flushAuto();
+          }
           if(current()) { close(); playSound('save'); showMsg(message('Saved to the cloud.', 'המשחק נשמר בענן.')); }
         }));
         if(row) button(line,'✕',()=>act(async()=>{
@@ -365,7 +452,7 @@
     const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([user,slot,state])));
     const hex=Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
     row.id=[hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20,32)].join('-');
-    await database('?on_conflict=id',{method:'POST',body:row,prefer:'resolution=ignore-duplicates,return=minimal'});
+    await database('?on_conflict=id',{method:'POST',body:await encodeRecord(row),prefer:'resolution=ignore-duplicates,return=minimal',timeout:saveTimeout});
   }
   window.empireonSaves={menu, close, scheduleAuto, flushAuto};
   window.empireonReports={submit: submitBugReport};

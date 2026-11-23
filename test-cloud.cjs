@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const {webcrypto} = require('node:crypto');
-const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_34_Cloud_Save_Optimization.html'),'utf8');
+const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_36_Cloud_Save_Recovery.html'),'utf8');
 const code=fs.readFileSync(path.join(__dirname,'cloud.js'),'utf8');
 const version=page.match(/const CIVI_VERSION='([^']+)'/)[1];
 assert(page.includes('<script>\n'+code+'\n</script>'));
@@ -25,10 +25,13 @@ const prefix='empireon_mobilization_save_slot_';
 const state={MAP_WIDTH:1,MAP_HEIGHT:1,map:[[{col:0,row:0,terrain:0,hasRoad:true,hasRiver:false,resource:null}]],units:[],cities:[],saveName:'Test',worldSeed:42,turnNumber:8,savedAt:new Date().toISOString()};
 const history=[{turn:1,map:[[{terrain:0,improvement:null,road:true,oilPipeline:false}]]},{turn:2,map:null}];
 let auth=0, offline=false, loaded, delayNextAuto, autoWaiting, rejectAutosave=false;
+let nextManualTimeout;
+const timeoutError=()=>Object.assign(Error('Request elapsed'),{name:'TimeoutError'});
 const context={
   window:{addEventListener(){}}, document:{getElementById:k=>ids[k],createElement:tag=>new Element(tag),addEventListener(){}},
   navigator:{},localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>{localWrites.push(k);store.set(k,v)},removeItem:k=>store.delete(k)},
   crypto:webcrypto,AbortSignal,URL,Date,TextEncoder,TypeError,console,
+  CompressionStream,DecompressionStream,Blob,Response,btoa,atob,
   setTimeout:()=>1,clearTimeout(){},gameStarted:true,civiLanguage:'en',CIVI_VERSION:version, SAVE_SLOT_COUNT:6,SAVE_PREFIX:prefix,LEGACY_SAVE_KEY:'legacy',
   makeSaveData:()=>structuredClone(state),applySaveData:d=>{loaded=d},gameHistory:history,historyEvents:['started'],
   confirm:()=>true,playSound(){},showMsg:t=>messages.push(t),
@@ -50,7 +53,15 @@ const context={
     const rowid=(q.get('id')||'').replace('eq.',''),current=rows.get(rowid);
     if(opts.method==='GET'){
       if(rowid) return reply(current?[current]:[]);
+      if(q.get('slot')?.startsWith('eq.')) return reply([...rows.values()].filter(r=>r.slot===Number(q.get('slot').slice(3))));
       return reply([...rows.values()].filter(r=>(q.get('slot')==='is.null')===(r.slot===null)));
+    }
+    const fault=body?.slot>0?nextManualTimeout:null;
+    if(fault) nextManualTimeout=null;
+    if(fault==='before-write') throw timeoutError();
+    if(fault==='concurrent-write'){
+      rows.set(rowid,{...current, revision:webcrypto.randomUUID(), turn_number:99});
+      throw timeoutError();
     }
     if(opts.method==='POST'){
       if(body.slot===0 && rejectAutosave) return reply({code:'57014'},503);
@@ -63,10 +74,15 @@ const context={
       if(body.id && rows.has(body.id))return reply(null,201);
       if(slotrow && !q.has('on_conflict'))return reply({code:'23505'},409);
       const id=body.id||slotrow?.id||webcrypto.randomUUID();
-      rows.set(id,{...body,id,created_at:new Date().toISOString()});return reply(null,201);
+      rows.set(id,{...body,id,created_at:new Date().toISOString()});
+      if(fault==='after-write') throw timeoutError();
+      return reply(null,201);
     }
     if(!current || q.get('revision')!=='eq.'+current.revision)return reply([]);
-    if(opts.method==='PATCH')rows.set(rowid,{...current,...body});
+    if(opts.method==='PATCH'){
+      rows.set(rowid,{...current,...body});
+      if(fault==='after-write') throw timeoutError();
+    }
     if(opts.method==='DELETE')rows.delete(rowid);
     return reply([{id:rowid}]);
   }
@@ -151,6 +167,73 @@ const context={
   assert.equal([...rows.values()].filter(r=>r.slot===null).length,1);
   assert(store.has(prefix+2));assert(!localWrites.some(k=>k.includes('save_slot')||k==='legacy'));
   assert(localWrites.every(k=>k.startsWith('empireon.cloud.session.v1')));
+  const getSlot=slot=>[...rows.values()].find(row=>row.slot===slot);
+  state.turnNumber=14;
+  state.saveThumbnail='data:image/jpeg;base64,preview';
+  history.push({turn:14,map:null,details:'נמל ⚓ '.repeat(2500)});
+  nextManualTimeout='before-write';
+  await context.window.openSaveMenu();
+  let requests=seen.length;
+  await buttons('Save')[1].onclick();
+  assert(modal.hidden);
+  const attempts=seen.slice(requests).filter(action=>action.opts.method==='POST');
+  assert.equal(attempts.length,2);
+  assert.equal(attempts[0].opts.body,attempts[1].opts.body);
+  assert(Buffer.byteLength(attempts[0].opts.body)<4096);
+  const packed=getSlot(2).state;
+  assert(packed.gzipBase64 && packed.saveThumbnail===state.saveThumbnail);
+  assert.equal(packed.savedAt,state.savedAt);
+  await context.window.openLoadMenu();
+  await buttons('Load')[0].onclick();
+  assert.equal(loaded.turnNumber,14);
+  assert.deepEqual(JSON.parse(JSON.stringify(loaded.map)),[[{terrain:0,hasRoad:true}]]);
+  assert.equal(loaded.gameHistory.at(-1).details,history.at(-1).details);
+  assert.equal(loaded.saveThumbnail,state.saveThumbnail);
+  await ui.flushAuto();
+  assert(getSlot(0).state.gzipBase64);
+
+  state.turnNumber=15;
+  nextManualTimeout='after-write';
+  await context.window.openSaveMenu();
+  requests=seen.length;
+  await buttons('Save')[1].onclick();
+  assert(modal.hidden);
+  assert.equal(seen.slice(requests).filter(action=>action.opts.method==='PATCH').length,1);
+  assert.equal(getSlot(2).turn_number,15);
+
+  nextManualTimeout='concurrent-write';
+  await context.window.openSaveMenu();
+  requests=seen.length;
+  await buttons('Save')[1].onclick();
+  assert(!modal.hidden && status.textContent.includes('changed'));
+  assert.equal(seen.slice(requests).filter(action=>action.opts.method==='PATCH').length,1);
+  assert.equal(getSlot(2).turn_number,99);
+
+  context.CompressionStream=undefined;
+  state.turnNumber=16;
+  await context.window.openSaveMenu();
+  await buttons('Save')[2].onclick();
+  assert.equal(getSlot(3).state.turnNumber,16);
+  assert(!getSlot(3).state.gzipBase64);
+  context.CompressionStream=CompressionStream;
+
+  let releaseAuto;
+  delayNextAuto=new Promise(resolve=>{releaseAuto=resolve});
+  const reachedAuto=new Promise(resolve=>{autoWaiting=resolve});
+  state.turnNumber=17;
+  ui.scheduleAuto();
+  const background=ui.flushAuto();
+  await reachedAuto;
+  await context.window.openSaveMenu();
+  requests=seen.length;
+  const manual=buttons('Save')[3].onclick();
+  while(status.textContent==='Please wait…') await new Promise(resolve=>setImmediate(resolve));
+  assert.match(status.textContent,/Waiting for the current autosave/);
+  assert.equal(seen.length,requests);
+  releaseAuto();
+  await background;
+  await manual;
+  assert.equal(getSlot(4).turn_number,17);
   const report=context.window.empireonReports, data={steps:'Open city',expected:'City opens',diagnostics:{turn:10,screen:'world-map'}};
   offline=true;
   await assert.rejects(() => report.submit('City does not open',data), /offline/);
@@ -162,4 +245,5 @@ const context={
   console.log('PASS: all embedded scripts parse; real menu and autosave entry points, anonymous sign-in, 5 slots, reload, overwrite conflict, deletion, offline failure/retry, legacy import without duplicates; no browser game-state writes.');
   console.log('PASS: saves omit default tile fields and retain chronicle data. Load waits for queued autosaves, indicates failed writes and avoids re-uploading unchanged autosaves.');
   console.log('PASS: bug reports use the save session and insert only, with database defaults and recovery from a failed request.');
+  console.log('PASS: gzip round trip with Hebrew and history, plain JSON fallback, exact retry after timeout, confirmation after lost response and serialized autosave/manual uploads.');
 })().catch(e=>{console.error(e);process.exitCode=1});
