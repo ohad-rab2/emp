@@ -84,7 +84,8 @@
   function describe(error) {
     if (invalidSession) return message('This player session has expired.', 'פג תוקף הזיהוי של השחקן.');
     if (error.message === '23505') return changed().message;
-    if (error.status || error instanceof TypeError || error.name === 'TimeoutError') {
+    if (error.name === 'TimeoutError') return message('The cloud request timed out. Try again.', 'תם הזמן שהוקצב לבקשה לענן. אפשר לנסות שוב.');
+    if (error.status || error instanceof TypeError) {
       return message('Cannot reach cloud saves. Try again in a moment.', 'השמירות בענן אינן זמינות כרגע. אפשר לנסות שוב בעוד רגע.');
     }
     return error.message;
@@ -96,10 +97,31 @@
     data.historyEvents = historyEvents;
     return data;
   }
+  function compactTileMap(map) {
+    function compactTile(tile) {
+      if (!tile || typeof tile !== 'object') return tile;
+      const compact = Object.create(null);
+      // The array position already stores coordinates. The loader restores false and null defaults.
+      for (const key of Object.keys(tile)) {
+        if (key !== 'col' && key !== 'row' && tile[key] !== false && tile[key] !== null) compact[key] = tile[key];
+      }
+      return compact;
+    }
+    return map.map(column => Array.isArray(column) ? column.map(compactTile) : compactTile(column));
+  }
+  const packedHistoryMaps = new WeakMap();
+  function compactHistorySnapshot(snapshot) {
+    if (!Array.isArray(snapshot?.map)) return snapshot;
+    // The game replaces chronicle snapshots and never modifies their tiles.
+    if (!packedHistoryMaps.has(snapshot.map)) packedHistoryMaps.set(snapshot.map, compactTileMap(snapshot.map));
+    return {...snapshot, map:packedHistoryMaps.get(snapshot.map)};
+  }
   function record(state, slot) {
+    const compact = {...state, map:compactTileMap(state.map)};
+    if (Array.isArray(state.gameHistory)) compact.gameHistory = state.gameHistory.map(compactHistorySnapshot);
     return {slot, name:String(state.saveName || 'EMPIREON').slice(0,200),
       turn_number:state.turnNumber ?? 1, game_version:CIVI_VERSION, schema_version:1,
-      revision:crypto.randomUUID(), state};
+      revision:crypto.randomUUID(), state:compact};
   }
   function validate(state) {
     const width=state?.MAP_WIDTH, height=state?.MAP_HEIGHT;
@@ -130,13 +152,16 @@
     if (!result?.length) throw changed();
   }
 
-  let autoTimer, pending=false, queued, writing=false, failureReported=false;
+  let autoTimer, pending=false, queued, autoWrite, failureReported=false;
+  function hasPendingAutosave() {
+    return !!(autoWrite || queued || pending && gameStarted);
+  }
   function scheduleAuto() {
     if (!gameStarted) return;
     pending=true;
-    if (!autoTimer && !writing) autoTimer=setTimeout(flushAuto,3000);
+    if (!autoTimer && !autoWrite) autoTimer=setTimeout(flushAuto,3000);
   }
-  async function flushAuto() {
+  function flushAuto() {
     clearTimeout(autoTimer); autoTimer=undefined;
     try {
       if (pending && gameStarted) {
@@ -148,22 +173,21 @@
       if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
       failureReported=true;
       autoTimer=setTimeout(flushAuto,30000);
-      return;
+      return autoWrite;
     }
-    if (writing || !queued) return;
-    writing=true;
+    if (autoWrite || !queued) return autoWrite;
     const payload=queued; queued=undefined;
-    try {
-      await database('?on_conflict=user_id,slot',{method:'POST',body:payload,prefer:'resolution=merge-duplicates,return=minimal'});
+    autoWrite=database('?on_conflict=user_id,slot',{method:'POST',body:payload,prefer:'resolution=merge-duplicates,return=minimal'}).then(()=>{
       failureReported=false;
-    } catch (error) {
+    }).catch(error=>{
       queued=queued || payload;
       if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
       failureReported=true;
-    } finally {
-      writing=false;
+    }).finally(()=>{
+      autoWrite=undefined;
       if (queued || pending && gameStarted) autoTimer=setTimeout(flushAuto,failureReported?30000:queued?0:3000);
-    }
+    });
+    return autoWrite;
   }
   window.addEventListener('online',flushAuto);
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden') void flushAuto();});
@@ -203,7 +227,7 @@
       if (!rows?.length || rows[0].schema_version!==1) throw changed();
       validate(rows[0].state);
       applySaveData(rows[0].state);
-      scheduleAuto();
+      if (row.slot!==0) scheduleAuto();
       close(); playSound('load'); showMsg(message('Game loaded.', 'המשחק נטען.'));
     }
     function addRow(slot,row,parent=list) {
@@ -256,6 +280,14 @@
       }
     }
     try {
+      if (!saving && hasPendingAutosave()) {
+        status.textContent=message('Finishing autosave…', 'מסיים את השמירה האוטומטית…');
+        await flushAuto();
+        if (!current()) return;
+        // A newer turn may have queued behind the upload that was already in flight.
+        if (!failureReported && hasPendingAutosave()) await flushAuto();
+        if (!current()) return;
+      }
       const rows=await listSlots(); if(!current()) return;
       let manualSlots=list;
       if(!saving) {
@@ -278,7 +310,9 @@
           if(current()) await menu('load');
         }));
       }
-      status.textContent=saving?message('Choose a cloud save slot.', 'בחר תא שמירה בענן.'):message('Choose a game to load.', 'בחר משחק לטעינה.');
+      status.textContent=saving?message('Choose a cloud save slot.', 'בחר תא שמירה בענן.'):
+        hasPendingAutosave()?message('The latest autosave is pending. Showing saves confirmed by the server.', 'השמירה האוטומטית האחרונה עדיין ממתינה. מוצגות השמירות שהשרת אישר.'):
+        message('Choose a game to load.', 'בחר משחק לטעינה.');
     } catch(error) {
       if(!current()) return;
       status.textContent=describe(error);

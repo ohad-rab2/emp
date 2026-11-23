@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const {webcrypto} = require('node:crypto');
-const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_33_Bug_Reports.html'),'utf8');
+const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_34_Cloud_Save_Optimization.html'),'utf8');
 const code=fs.readFileSync(path.join(__dirname,'cloud.js'),'utf8');
 const version=page.match(/const CIVI_VERSION='([^']+)'/)[1];
 assert(page.includes('<script>\n'+code+'\n</script>'));
@@ -22,14 +22,15 @@ class Element {
 const ids=Object.fromEntries(['save-slot-list','save-load-title','save-load-modal','save-load-subtitle'].map(n=>[n,new Element('div')]));
 const store=new Map(), localWrites=[], seen=[], rows=new Map(), messages=[], reports=[];
 const prefix='empireon_mobilization_save_slot_';
-const state={MAP_WIDTH:1,MAP_HEIGHT:1,map:[[{terrain:1}]],units:[],cities:[],saveName:'Test',worldSeed:42,turnNumber:8,savedAt:new Date().toISOString()};
-let auth=0, offline=false, loaded;
+const state={MAP_WIDTH:1,MAP_HEIGHT:1,map:[[{col:0,row:0,terrain:0,hasRoad:true,hasRiver:false,resource:null}]],units:[],cities:[],saveName:'Test',worldSeed:42,turnNumber:8,savedAt:new Date().toISOString()};
+const history=[{turn:1,map:[[{terrain:0,improvement:null,road:true,oilPipeline:false}]]},{turn:2,map:null}];
+let auth=0, offline=false, loaded, delayNextAuto, autoWaiting, rejectAutosave=false;
 const context={
   window:{addEventListener(){}}, document:{getElementById:k=>ids[k],createElement:tag=>new Element(tag),addEventListener(){}},
   navigator:{},localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>{localWrites.push(k);store.set(k,v)},removeItem:k=>store.delete(k)},
   crypto:webcrypto,AbortSignal,URL,Date,TextEncoder,TypeError,console,
   setTimeout:()=>1,clearTimeout(){},gameStarted:true,civiLanguage:'en',CIVI_VERSION:version, SAVE_SLOT_COUNT:6,SAVE_PREFIX:prefix,LEGACY_SAVE_KEY:'legacy',
-  makeSaveData:()=>structuredClone(state),applySaveData:d=>{loaded=d},gameHistory:[{turn:1}],historyEvents:['started'],
+  makeSaveData:()=>structuredClone(state),applySaveData:d=>{loaded=d},gameHistory:history,historyEvents:['started'],
   confirm:()=>true,playSound(){},showMsg:t=>messages.push(t),
   fetch:async(url,opts)=>{
     const u=new URL(url),body=opts.body?JSON.parse(opts.body):null,q=u.searchParams;
@@ -52,6 +53,12 @@ const context={
       return reply([...rows.values()].filter(r=>(q.get('slot')==='is.null')===(r.slot===null)));
     }
     if(opts.method==='POST'){
+      if(body.slot===0 && rejectAutosave) return reply({code:'57014'},503);
+      if(body.slot===0 && delayNextAuto){
+        const waiting=delayNextAuto;delayNextAuto=null;
+        autoWaiting();
+        await waiting;
+      }
       const slotrow=[...rows.values()].find(r=>r.slot===body.slot && r.slot!==null);
       if(body.id && rows.has(body.id))return reply(null,201);
       if(slotrow && !q.has('on_conflict'))return reply({code:'23505'},409);
@@ -76,8 +83,11 @@ const context={
   assert.equal(auth,1);assert.equal(buttons('Save').length,5);
   await buttons('Save')[0].onclick();
   const entry=()=>[...rows.values()].find(r=>r.slot===1);
-  assert.equal(entry().state.turnNumber,8);assert.equal(entry().state.gameHistory.length,1);assert(modal.hidden);
+  assert.equal(entry().state.turnNumber,8);assert.equal(entry().state.gameHistory.length,2);assert(modal.hidden);
   assert.equal(entry().game_version,version);
+  assert.deepEqual(entry().state.map,[[{terrain:0,hasRoad:true}]]);
+  assert.deepEqual(entry().state.gameHistory,[{turn:1,map:[[{terrain:0,road:true}]]},{turn:2,map:null}]);
+  assert.deepEqual(history[0].map,[[{terrain:0,improvement:null,road:true,oilPipeline:false}]]);
   await context.window.openSaveMenu();const firstId=entry().id;state.turnNumber=9;
   await buttons('Save')[0].onclick();assert.equal(entry().id,firstId);assert.equal(entry().state.turnNumber,9);
   await context.window.openSaveMenu();entry().revision=webcrypto.randomUUID();
@@ -94,6 +104,36 @@ const context={
   assert.equal(buttons('Continue').length,1);
   await buttons('Continue')[0].onclick();
   assert.equal(loaded.turnNumber,10);
+  const requestsBeforeFlush=seen.length;
+  await ui.flushAuto();
+  assert.equal(seen.length,requestsBeforeFlush);
+  let releaseSave;
+  delayNextAuto=new Promise(resolve=>{releaseSave=resolve});
+  const reachedRequest=new Promise(resolve=>{autoWaiting=resolve});
+  state.turnNumber=11;
+  ui.scheduleAuto();
+  const uploading=ui.flushAuto();
+  await reachedRequest;
+  state.turnNumber=12;
+  ui.scheduleAuto();
+  const listing=context.window.openLoadMenu();
+  assert.match(status.textContent,/Finishing autosave/);
+  assert.equal(auto()[0].turn_number,10);
+  releaseSave();
+  await uploading;
+  await listing;
+  assert.equal(auto()[0].turn_number,12);
+  await buttons('Continue')[0].onclick();
+  assert.equal(loaded.turnNumber,12);
+  state.turnNumber=13;
+  ui.scheduleAuto();
+  rejectAutosave=true;
+  await context.window.openLoadMenu();
+  assert.match(status.textContent,/latest autosave is pending/);
+  assert.equal(auto()[0].turn_number,12);
+  rejectAutosave=false;
+  await ui.flushAuto();
+  assert.equal(auto()[0].turn_number,13);
   context.civiLanguage='he';
   await context.window.openLoadMenu();
   assert.equal(list.children[0].children[0].children[0].textContent,'שמירה אוטומטית');
@@ -120,5 +160,6 @@ const context={
   assert.deepEqual(reports,[{user_id:'aa',bug_description:'City does not open',bug_data:data,game_version:version}]);
   assert.equal(auth,1);
   console.log('PASS: all embedded scripts parse; real menu and autosave entry points, anonymous sign-in, 5 slots, reload, overwrite conflict, deletion, offline failure/retry, legacy import without duplicates; no browser game-state writes.');
+  console.log('PASS: saves omit default tile fields and retain chronicle data. Load waits for queued autosaves, indicates failed writes and avoids re-uploading unchanged autosaves.');
   console.log('PASS: bug reports use the save session and insert only, with database defaults and recovery from a failed request.');
 })().catch(e=>{console.error(e);process.exitCode=1});
