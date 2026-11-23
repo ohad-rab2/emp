@@ -4,8 +4,9 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const {webcrypto} = require('node:crypto');
-const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_32_Command_and_Infrastructure.html'),'utf8');
+const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_33_Bug_Reports.html'),'utf8');
 const code=fs.readFileSync(path.join(__dirname,'cloud.js'),'utf8');
+const version=page.match(/const CIVI_VERSION='([^']+)'/)[1];
 assert(page.includes('<script>\n'+code+'\n</script>'));
 assert(!page.includes('function saveToSlot(') && !page.includes('function civiDbWrite('));
 assert(!page.includes('empireon-cloud-open') && !page.includes('grant_type=password'));
@@ -19,7 +20,7 @@ class Element {
   buttons() {return this.children.flatMap(n=>[...(n.tag==='button'?[n]:[]),...n.buttons()]);}
 }
 const ids=Object.fromEntries(['save-slot-list','save-load-title','save-load-modal','save-load-subtitle'].map(n=>[n,new Element('div')]));
-const store=new Map(), localWrites=[], seen=[], rows=new Map(), messages=[];
+const store=new Map(), localWrites=[], seen=[], rows=new Map(), messages=[], reports=[];
 const prefix='empireon_mobilization_save_slot_';
 const state={MAP_WIDTH:1,MAP_HEIGHT:1,map:[[{terrain:1}]],units:[],cities:[],saveName:'Test',worldSeed:42,turnNumber:8,savedAt:new Date().toISOString()};
 let auth=0, offline=false, loaded;
@@ -27,7 +28,7 @@ const context={
   window:{addEventListener(){}}, document:{getElementById:k=>ids[k],createElement:tag=>new Element(tag),addEventListener(){}},
   navigator:{},localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>{localWrites.push(k);store.set(k,v)},removeItem:k=>store.delete(k)},
   crypto:webcrypto,AbortSignal,URL,Date,TextEncoder,TypeError,console,
-  setTimeout:()=>1,clearTimeout(){},gameStarted:true,civiLanguage:'en', SAVE_SLOT_COUNT:6,SAVE_PREFIX:prefix,LEGACY_SAVE_KEY:'legacy',
+  setTimeout:()=>1,clearTimeout(){},gameStarted:true,civiLanguage:'en',CIVI_VERSION:version, SAVE_SLOT_COUNT:6,SAVE_PREFIX:prefix,LEGACY_SAVE_KEY:'legacy',
   makeSaveData:()=>structuredClone(state),applySaveData:d=>{loaded=d},gameHistory:[{turn:1}],historyEvents:['started'],
   confirm:()=>true,playSound(){},showMsg:t=>messages.push(t),
   fetch:async(url,opts)=>{
@@ -37,6 +38,13 @@ const context={
     const reply=(data,status=200)=>({ok:status<300,status,text:async()=>data==null?'':JSON.stringify(data)});
     if(u.pathname==='/auth/v1/signup'){auth++;assert.deepEqual(body,{data:{}});return reply({user:{id:'aa'},access_token:'jwt',refresh_token:'refresh',expires_in:3600});}
     assert.equal(opts.headers.Authorization,'Bearer jwt');
+    if(u.pathname==='/rest/v1/bug_reports'){
+      assert.equal(opts.method,'POST');
+      assert.equal(u.search,'');
+      assert.equal(opts.headers.Prefer,'return=minimal');
+      reports.push(body);
+      return reply(null,201);
+    }
     assert.equal(u.pathname,'/rest/v1/saved_games');
     const rowid=(q.get('id')||'').replace('eq.',''),current=rows.get(rowid);
     if(opts.method==='GET'){
@@ -69,6 +77,7 @@ const context={
   await buttons('Save')[0].onclick();
   const entry=()=>[...rows.values()].find(r=>r.slot===1);
   assert.equal(entry().state.turnNumber,8);assert.equal(entry().state.gameHistory.length,1);assert(modal.hidden);
+  assert.equal(entry().game_version,version);
   await context.window.openSaveMenu();const firstId=entry().id;state.turnNumber=9;
   await buttons('Save')[0].onclick();assert.equal(entry().id,firstId);assert.equal(entry().state.turnNumber,9);
   await context.window.openSaveMenu();entry().revision=webcrypto.randomUUID();
@@ -102,5 +111,14 @@ const context={
   assert.equal([...rows.values()].filter(r=>r.slot===null).length,1);
   assert(store.has(prefix+2));assert(!localWrites.some(k=>k.includes('save_slot')||k==='legacy'));
   assert(localWrites.every(k=>k.startsWith('empireon.cloud.session.v1')));
+  const report=context.window.empireonReports, data={steps:'Open city',expected:'City opens',diagnostics:{turn:10,screen:'world-map'}};
+  offline=true;
+  await assert.rejects(() => report.submit('City does not open',data), /offline/);
+  assert.equal(reports.length,0);
+  offline=false;
+  await report.submit('City does not open',data);
+  assert.deepEqual(reports,[{user_id:'aa',bug_description:'City does not open',bug_data:data,game_version:version}]);
+  assert.equal(auth,1);
   console.log('PASS: all embedded scripts parse; real menu and autosave entry points, anonymous sign-in, 5 slots, reload, overwrite conflict, deletion, offline failure/retry, legacy import without duplicates; no browser game-state writes.');
+  console.log('PASS: bug reports use the save session and insert only, with database defaults and recovery from a failed request.');
 })().catch(e=>{console.error(e);process.exitCode=1});

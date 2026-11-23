@@ -1,4 +1,4 @@
-/* Anonymous database saves. Bundled inside the standalone HTML. */
+/* Anonymous cloud saves and bug reports. Bundled inside the standalone HTML. */
 (() => {
   'use strict';
   const project = 'https://fcuijevvmjvjsaajonyb.supabase.co';
@@ -67,6 +67,20 @@
     const session = await identity();
     return request(table + query, {...options, body:payload, token:session.access_token});
   }
+  async function submitBugReport(description, diagnostics) {
+    const session = await identity();
+    await request('/rest/v1/bug_reports', {
+      method: 'POST',
+      token: session.access_token,
+      prefer: 'return=minimal',
+      body: {
+        user_id: session.user.id,
+        bug_description: description,
+        bug_data: diagnostics,
+        game_version: CIVI_VERSION
+      }
+    });
+  }
   function describe(error) {
     if (invalidSession) return message('This player session has expired.', 'פג תוקף הזיהוי של השחקן.');
     if (error.message === '23505') return changed().message;
@@ -84,7 +98,7 @@
   }
   function record(state, slot) {
     return {slot, name:String(state.saveName || 'EMPIREON').slice(0,200),
-      turn_number:state.turnNumber ?? 1, game_version:'87.32', schema_version:1,
+      turn_number:state.turnNumber ?? 1, game_version:CIVI_VERSION, schema_version:1,
       revision:crypto.randomUUID(), state};
   }
   function validate(state) {
@@ -320,4 +334,5 @@
     await database('?on_conflict=id',{method:'POST',body:row,prefer:'resolution=ignore-duplicates,return=minimal'});
   }
   window.empireonSaves={menu, close, scheduleAuto, flushAuto};
+  window.empireonReports={submit: submitBugReport};
 })();
