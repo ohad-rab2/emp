@@ -1,4 +1,4 @@
-/* EMPIREON 87.30: anonymous database saves. Bundled inside the standalone HTML. */
+/* Anonymous database saves. Bundled inside the standalone HTML. */
 (() => {
   'use strict';
   const project = 'https://fcuijevvmjvjsaajonyb.supabase.co';
@@ -84,7 +84,7 @@
   }
   function record(state, slot) {
     return {slot, name:String(state.saveName || 'EMPIREON').slice(0,200),
-      turn_number:state.turnNumber ?? 1, game_version:'87.30', schema_version:1,
+      turn_number:state.turnNumber ?? 1, game_version:'87.32', schema_version:1,
       revision:crypto.randomUUID(), state};
   }
   function validate(state) {
@@ -192,15 +192,27 @@
       scheduleAuto();
       close(); playSound('load'); showMsg(message('Game loaded.', 'המשחק נטען.'));
     }
-    function addRow(slot,row) {
+    function addRow(slot,row,parent=list) {
+      const automatic=slot===0;
       const line=document.createElement('div');
       line.className='save-slot-card bg-slate-800 border border-slate-700 rounded-xl p-3 flex items-center gap-3';
+      if (automatic) line.className+=' save-slot-automatic';
       if (row?.thumbnail?.startsWith('data:image/')) {
         const img=document.createElement('img'); img.src=row.thumbnail; img.alt=''; img.className='w-20 rounded'; line.appendChild(img);
       }
       const label=document.createElement('div'); label.className='flex-1 min-w-0';
-      const title=slot===null?message('Previous save','שמירה קודמת'):slot===0?message('Autosave','שמירה אוטומטית'):message('Slot ','תא ')+slot;
-      label.textContent=title+(row?' · '+row.name:' · '+message('Empty','פנוי'));
+      if (automatic) {
+        const heading=document.createElement('h3');
+        heading.className='save-slot-automatic-title';
+        heading.textContent=message('Autosave','שמירה אוטומטית');
+        label.appendChild(heading);
+        const name=document.createElement('div');
+        name.textContent=row.name;
+        label.appendChild(name);
+      } else {
+        const title=slot===null?message('Previous save','שמירה קודמת'):message('Slot ','תא ')+slot;
+        label.textContent=title+(row?' · '+row.name:' · '+message('Empty','פנוי'));
+      }
       if (row) {
         const time=document.createElement('small'); time.className='block text-slate-400';
         time.textContent=new Date(row.saved_at||row.created_at).toLocaleString(); label.appendChild(time);
@@ -215,8 +227,11 @@
           if (!confirm(message('Delete this saved game?', 'למחוק את השמירה הזאת?'))) {status.textContent='';return;}
           await remove(row); if(current()) await menu(mode);
         }));
-      } else if(row) button(line,message('Load','טעינה'),()=>act(()=>load(row)));
-      list.appendChild(line);
+      } else if(row) {
+        const action=automatic?message('Continue','המשך משחק'):message('Load','טעינה');
+        button(line,action,()=>act(()=>load(row)));
+      }
+      parent.appendChild(line);
     }
     async function previousPage(offset) {
       const rows=await database('?slot=is.null&select=id,revision,name,created_at,turn_number&order=created_at.desc,id.desc&limit=26&offset='+offset);
@@ -228,8 +243,19 @@
     }
     try {
       const rows=await listSlots(); if(!current()) return;
-      if(!saving && rows.some(r=>r.slot===0)) addRow(0,rows.find(r=>r.slot===0));
-      for(let slot=1;slot<SAVE_SLOT_COUNT;slot++) addRow(slot,rows.find(r=>r.slot===slot));
+      let manualSlots=list;
+      if(!saving) {
+        const autosave=rows.find(row=>row.slot===0);
+        if(autosave) addRow(0,autosave);
+        manualSlots=document.createElement('section');
+        manualSlots.className='save-slot-manual-group';
+        const heading=document.createElement('h3');
+        heading.className='save-slot-manual-title';
+        heading.textContent=message('Manual saves','שמירות ידניות');
+        manualSlots.appendChild(heading);
+        list.appendChild(manualSlots);
+      }
+      for(let slot=1;slot<SAVE_SLOT_COUNT;slot++) addRow(slot,rows.find(r=>r.slot===slot),manualSlots);
       if(!saving) {
         await previousPage(0); if(!current()) return;
         const old=await legacySlots(); if(!current()) return;
