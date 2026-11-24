@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const {webcrypto} = require('node:crypto');
-const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_36_Cloud_Save_Recovery.html'),'utf8');
+const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_40_Sound_Completion.html'),'utf8');
 const code=fs.readFileSync(path.join(__dirname,'cloud.js'),'utf8');
 const version=page.match(/const CIVI_VERSION='([^']+)'/)[1];
 assert(page.includes('<script>\n'+code+'\n</script>'));
