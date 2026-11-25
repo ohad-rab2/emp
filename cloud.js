@@ -221,29 +221,27 @@
     if (!result?.length) throw changed();
   }
 
-  let autoTimer, pending=false, queued, autoWrite, manualWriting=false, failureReported=false;
+  let autoTimer, queued, autoWrite, manualWriting=false, failureReported=false;
   function hasPendingAutosave() {
-    return !!(autoWrite || queued || pending && gameStarted);
+    return !!(autoWrite || queued);
   }
-  function scheduleAuto() {
+  function reportAutosaveFailure(error) {
+    if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
+    failureReported=true;
+  }
+  function checkpoint() {
     if (!gameStarted) return;
-    pending=true;
-    if (!autoTimer && !autoWrite && !manualWriting) autoTimer=setTimeout(flushAuto,3000);
+    try {
+      // Capture the state before gameplay resumes or the main menu replaces it.
+      queued=encodeRecord(record(snapshot(),0));
+    } catch (error) {
+      reportAutosaveFailure(error);
+      return;
+    }
+    return flushAuto();
   }
   function flushAuto() {
     clearTimeout(autoTimer); autoTimer=undefined;
-    try {
-      if (pending && gameStarted) {
-        // Freeze the outgoing game before a menu, load, or new game changes its state.
-        queued=encodeRecord(record(snapshot(),0));
-        pending=false;
-      }
-    } catch (error) {
-      if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
-      failureReported=true;
-      autoTimer=setTimeout(flushAuto,30000);
-      return autoWrite;
-    }
     if (autoWrite || manualWriting || !queued) return autoWrite;
     const payload=queued; queued=undefined;
     autoWrite=payload.then(body=>database('?on_conflict=user_id,slot',{method:'POST',body,
@@ -251,16 +249,15 @@
       failureReported=false;
     }).catch(error=>{
       queued=queued || payload;
-      if (!failureReported) showMsg(message('Autosave failed. ', 'השמירה האוטומטית נכשלה. ')+describe(error));
-      failureReported=true;
+      reportAutosaveFailure(error);
     }).finally(()=>{
       autoWrite=undefined;
-      if (!manualWriting && (queued || pending && gameStarted)) autoTimer=setTimeout(flushAuto,failureReported?30000:queued?0:3000);
+      if (!manualWriting && queued) autoTimer=setTimeout(flushAuto,failureReported?30000:0);
     });
     return autoWrite;
   }
+  // Network recovery retries an existing snapshot, without taking a new one.
   window.addEventListener('online',flushAuto);
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden') void flushAuto();});
 
   let generation=0;
   function close() {
@@ -299,7 +296,6 @@
       if (!current()) return;
       validate(state);
       applySaveData(state);
-      if (row.slot!==0) scheduleAuto();
       close(); playSound('load'); showMsg(message('Game loaded.', 'המשחק נטען.'));
     }
     function addRow(slot,row,parent=list) {
@@ -454,6 +450,6 @@
     row.id=[hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20,32)].join('-');
     await database('?on_conflict=id',{method:'POST',body:await encodeRecord(row),prefer:'resolution=ignore-duplicates,return=minimal',timeout:saveTimeout});
   }
-  window.empireonSaves={menu, close, scheduleAuto, flushAuto};
+  window.empireonSaves={menu, close, checkpoint};
   window.empireonReports={submit: submitBugReport};
 })();

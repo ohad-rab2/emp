@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const {webcrypto} = require('node:crypto');
-const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_41_Production_Groups.html'),'utf8');
+const page=fs.readFileSync(path.join(__dirname,'EMPIREON_v87_43_Turn_End_Autosave.html'),'utf8');
 const code=fs.readFileSync(path.join(__dirname,'cloud.js'),'utf8');
 const version=page.match(/const CIVI_VERSION='([^']+)'/)[1];
 assert(page.includes('<script>\n'+code+'\n</script>'));
@@ -25,15 +25,16 @@ const prefix='empireon_mobilization_save_slot_';
 const state={MAP_WIDTH:1,MAP_HEIGHT:1,map:[[{col:0,row:0,terrain:0,hasRoad:true,hasRiver:false,resource:null}]],units:[],cities:[],saveName:'Test',worldSeed:42,turnNumber:8,savedAt:new Date().toISOString()};
 const history=[{turn:1,map:[[{terrain:0,improvement:null,road:true,oilPipeline:false}]]},{turn:2,map:null}];
 let auth=0, offline=false, loaded, delayNextAuto, autoWaiting, rejectAutosave=false;
-let nextManualTimeout;
+let nextManualTimeout, snapshots=0;
+const browserEvents=new Map();
 const timeoutError=()=>Object.assign(Error('Request elapsed'),{name:'TimeoutError'});
 const context={
-  window:{addEventListener(){}}, document:{getElementById:k=>ids[k],createElement:tag=>new Element(tag),addEventListener(){}},
+  window:{addEventListener:(name,f)=>browserEvents.set(name,f)}, document:{getElementById:k=>ids[k],createElement:tag=>new Element(tag),addEventListener:(name,f)=>browserEvents.set(name,f)},
   navigator:{},localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>{localWrites.push(k);store.set(k,v)},removeItem:k=>store.delete(k)},
   crypto:webcrypto,AbortSignal,URL,Date,TextEncoder,TypeError,console,
   CompressionStream,DecompressionStream,Blob,Response,btoa,atob,
   setTimeout:()=>1,clearTimeout(){},gameStarted:true,civiLanguage:'en',CIVI_VERSION:version, SAVE_SLOT_COUNT:6,SAVE_PREFIX:prefix,LEGACY_SAVE_KEY:'legacy',
-  makeSaveData:()=>structuredClone(state),applySaveData:d=>{loaded=d},gameHistory:history,historyEvents:['started'],
+  makeSaveData:()=>{snapshots++; return structuredClone(state)},applySaveData:d=>{loaded=d},gameHistory:history,historyEvents:['started'],
   confirm:()=>true,playSound(){},showMsg:t=>messages.push(t),
   fetch:async(url,opts)=>{
     const u=new URL(url),body=opts.body?JSON.parse(opts.body):null,q=u.searchParams;
@@ -109,8 +110,14 @@ const context={
   await context.window.openSaveMenu();entry().revision=webcrypto.randomUUID();
   await buttons('Save')[0].onclick();assert(!modal.hidden && status.textContent.includes('changed'));
   await context.window.openLoadMenu();await buttons('Load')[0].onclick();assert.equal(loaded.turnNumber,9);
-  vm.runInNewContext(page.match(/function saveGame\(\) \{ window\.empireonSaves\.scheduleAuto\(\); \}/)[0]+';saveGame();saveGame()',context);
-  await ui.flushAuto();state.turnNumber=10;ui.scheduleAuto();await ui.flushAuto();
+  const snapshotsAfterLoad=snapshots;
+  const requestsAfterLoad=seen.length;
+  assert(!browserEvents.has('visibilitychange'));
+  await browserEvents.get('online')();
+  assert.equal(snapshots,snapshotsAfterLoad);
+  assert.equal(seen.length,requestsAfterLoad);
+  assert(![...rows.values()].some(r=>r.slot===0));
+  await ui.checkpoint();state.turnNumber=10;await ui.checkpoint();
   const auto=()=>[...rows.values()].filter(r=>r.slot===0);
   assert.equal(auto().length,1);assert.equal(auto()[0].turn_number,10);
   await context.window.openLoadMenu();
@@ -121,17 +128,17 @@ const context={
   await buttons('Continue')[0].onclick();
   assert.equal(loaded.turnNumber,10);
   const requestsBeforeFlush=seen.length;
-  await ui.flushAuto();
+  await browserEvents.get('online')();
   assert.equal(seen.length,requestsBeforeFlush);
   let releaseSave;
   delayNextAuto=new Promise(resolve=>{releaseSave=resolve});
   const reachedRequest=new Promise(resolve=>{autoWaiting=resolve});
   state.turnNumber=11;
-  ui.scheduleAuto();
-  const uploading=ui.flushAuto();
+  const uploading=ui.checkpoint();
   await reachedRequest;
   state.turnNumber=12;
-  ui.scheduleAuto();
+  void ui.checkpoint();
+  context.gameStarted=false;state.turnNumber=42;
   const listing=context.window.openLoadMenu();
   assert.match(status.textContent,/Finishing autosave/);
   assert.equal(auto()[0].turn_number,10);
@@ -141,15 +148,20 @@ const context={
   assert.equal(auto()[0].turn_number,12);
   await buttons('Continue')[0].onclick();
   assert.equal(loaded.turnNumber,12);
-  state.turnNumber=13;
-  ui.scheduleAuto();
+  context.gameStarted=true;state.turnNumber=13;
   rejectAutosave=true;
+  const rejected=ui.checkpoint();
+  await rejected;
   await context.window.openLoadMenu();
   assert.match(status.textContent,/latest autosave is pending/);
   assert.equal(auto()[0].turn_number,12);
   rejectAutosave=false;
-  await ui.flushAuto();
+  state.turnNumber=99;
+  const snapshotsBeforeRetry=snapshots;
+  await browserEvents.get('online')();
+  assert.equal(snapshots,snapshotsBeforeRetry);
   assert.equal(auto()[0].turn_number,13);
+  state.turnNumber=13;
   context.civiLanguage='he';
   await context.window.openLoadMenu();
   assert.equal(list.children[0].children[0].children[0].textContent,'שמירה אוטומטית');
@@ -159,8 +171,8 @@ const context={
   await context.window.openSaveMenu();offline=true;
   assert.equal(buttons('Continue').length,0);
   await buttons('Save')[1].onclick();assert(!modal.hidden && status.textContent.includes('Try again'));assert(![...rows.values()].some(r=>r.slot===2));
-  ui.scheduleAuto();await ui.flushAuto();assert(messages.at(-1).includes('Autosave failed'));offline=false;
-  await ui.flushAuto();assert.equal(auth,1);
+  await ui.checkpoint();assert(messages.at(-1).includes('Autosave failed'));offline=false;
+  await browserEvents.get('online')();assert.equal(auth,1);
   await context.window.openSaveMenu();await buttons('✕')[0].onclick();assert(!entry());
   store.set(prefix+2,JSON.stringify(state));
   for(let i=0;i<2;i++){await context.window.openLoadMenu();await buttons('Import saves from the previous version')[0].onclick();}
@@ -189,7 +201,9 @@ const context={
   assert.deepEqual(JSON.parse(JSON.stringify(loaded.map)),[[{terrain:0,hasRoad:true}]]);
   assert.equal(loaded.gameHistory.at(-1).details,history.at(-1).details);
   assert.equal(loaded.saveThumbnail,state.saveThumbnail);
-  await ui.flushAuto();
+  await browserEvents.get('online')();
+  assert.equal(getSlot(0).turn_number,13);
+  await ui.checkpoint();
   assert(getSlot(0).state.gzipBase64);
 
   state.turnNumber=15;
@@ -221,8 +235,7 @@ const context={
   delayNextAuto=new Promise(resolve=>{releaseAuto=resolve});
   const reachedAuto=new Promise(resolve=>{autoWaiting=resolve});
   state.turnNumber=17;
-  ui.scheduleAuto();
-  const background=ui.flushAuto();
+  const background=ui.checkpoint();
   await reachedAuto;
   await context.window.openSaveMenu();
   requests=seen.length;
@@ -243,7 +256,7 @@ const context={
   assert.deepEqual(reports,[{user_id:'aa',bug_description:'City does not open',bug_data:data,game_version:version}]);
   assert.equal(auth,1);
   console.log('PASS: all embedded scripts parse; real menu and autosave entry points, anonymous sign-in, 5 slots, reload, overwrite conflict, deletion, offline failure/retry, legacy import without duplicates; no browser game-state writes.');
-  console.log('PASS: saves omit default tile fields and retain chronicle data. Load waits for queued autosaves, indicates failed writes and avoids re-uploading unchanged autosaves.');
+  console.log('PASS: loading never creates autosaves. Queued checkpoints preserve their game state, and online recovery retries the same snapshot.');
   console.log('PASS: bug reports use the save session and insert only, with database defaults and recovery from a failed request.');
   console.log('PASS: gzip round trip with Hebrew and history, plain JSON fallback, exact retry after timeout, confirmation after lost response and serialized autosave/manual uploads.');
 })().catch(e=>{console.error(e);process.exitCode=1});
